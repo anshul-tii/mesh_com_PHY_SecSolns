@@ -109,7 +109,7 @@ class FieldTestLogPlotter:
 
         # Replace non-existing RSSI and/or MCS values with some defaults
         self.df['rssi [MAC,dBm;MAC,dBm ...]'].replace(np.nan,
-                                                      '00:00:00:00:00:00,-115 [-119, -118, -117]',
+                                                      '00:00:00:00:00:00,-115 [-115, -115, -115]',
                                                       inplace=True)
         self.df['RX MCS [MAC,MCS;MAC,MCS ...]'].replace(np.nan,
                                                         '00:00:00:00:00:00,-1',
@@ -117,34 +117,33 @@ class FieldTestLogPlotter:
         self.df['TX MCS [MAC,MCS;MAC,MCS ...]'].replace(np.nan,
                                                         '00:00:00:00:00:00,-1',
                                                         inplace=True)
-        # Drop any DF lines where timestamp is NaN
-        self.df.dropna(subset=['Timestamp'], inplace=True)
-        # Drop corrupted DF lines i.e. the ones where the
-        # last expected csv file column (with 'normally guaranteed' data) is empty.
-        self.df.dropna(subset=['3v3 current [mA]'], inplace=True)
-        # Reindex DF after any possible line drops
-        self.df.reset_index(drop=True, inplace=True)
-
+        # Ensure DCin columns exists in dataframe
         if 'DCin (XT30) voltage [mV]' not in self.df.columns:
             self.df['DCin (XT30) voltage [mV]'] = None
         if 'DCin (XT30) current [mA]' not in self.df.columns:
             self.df['DCin (XT30) current [mA]'] = None
-
-        if self.df.empty:
-            raise Exception('Dataframe is empty!')
-
-        # Debug
-        logger.debug(tabulate(self.df, headers='keys', tablefmt='psql'))
 
         # Calculate distance to base station and total distance moved around.
         self.__calculate_distances((self.__base_latitude, self.__base_longitude))
         self.__is_base_device()
 
         # Convert date time formatted information to relative time stamps in seconds.
-        self.df['Timestamp'] = pd.to_datetime(self.df['Timestamp'])
+        self.df['Timestamp'] = pd.to_datetime(self.df['Timestamp'], errors='coerce')
         self.df['Timestamp'] = pd.to_timedelta(self.df['Timestamp'] - self.df['Timestamp'][0])
         self.df['Timestamp'] = self.df['Timestamp'].dt.total_seconds()
 
+        # Drop any DF lines where timestamp is NaN or negative
+        self.df.dropna(subset=['Timestamp'], inplace=True)
+        self.df.drop(self.df[self.df['Timestamp'] < 0].index, inplace=True)
+        # Reindex DF after any possible line drops
+        self.df.reset_index(drop=True, inplace=True)
+
+        if self.df.empty:
+            raise Exception('Dataframe is empty!')
+
+        # Debug
+        logger.debug(tabulate(self.df, headers='keys', tablefmt='psql'))
+        
         self.__parse_rssi_data()
         self.__parse_mcs_class_data('RX MCS')
         self.__parse_mcs_class_data('TX MCS')
@@ -203,11 +202,20 @@ class FieldTestLogPlotter:
                     self.df[rssi_ant1_dbm] = None
                 if rssi_ant2_dbm not in self.df.columns:
                     self.df[rssi_ant2_dbm] = None
-                # Assign data using row index
-                self.df.loc[df_row_index, rssi_dbm] = pd.to_numeric(rssi_data[1])
-                self.df.loc[df_row_index, rssi_ant0_dbm] = pd.to_numeric(rssi_data[2])
-                self.df.loc[df_row_index, rssi_ant1_dbm] = pd.to_numeric(rssi_data[3])
-                self.df.loc[df_row_index, rssi_ant2_dbm] = pd.to_numeric(rssi_data[4])
+
+                # Assign data using row index.
+                # Log is assumed to contain at least some RSSI value (numeric or NaN string)
+                # in index 1. Antenna specific values are treated as optional.
+                if rssi_data[1] == "NaN":
+                    self.df.loc[df_row_index, rssi_dbm] = np.NaN
+                else:
+                    self.df.loc[df_row_index, rssi_dbm] = pd.to_numeric(rssi_data[1])
+                if len(rssi_data) > 2:
+                    self.df.loc[df_row_index, rssi_ant0_dbm] = pd.to_numeric(rssi_data[2])
+                if len(rssi_data) > 3:
+                    self.df.loc[df_row_index, rssi_ant1_dbm] = pd.to_numeric(rssi_data[3])
+                if len(rssi_data) > 4:
+                    self.df.loc[df_row_index, rssi_ant2_dbm] = pd.to_numeric(rssi_data[4])
 
         # Convert string/object type data to float
         for _mac in self.mac_list:
@@ -253,15 +261,12 @@ class FieldTestLogPlotter:
                     self.df[mcs_class] = None
                     self.df[mcs_class] = pd.to_numeric(self.df[mcs_class])
                 # Assign data using row index
-                # self.df[mcs_class][df_row_index] = mcs_data[1]
                 self.df.loc[df_row_index, mcs_class] = mcs_data[1]
         # Convert string/object type data to float
         for _mac in self.mac_list:
             mcs_class = _mac + ' ' + rx_or_tx
             # Convert data to float
             self.df = self.df.astype({mcs_class: float}, errors='raise')
-            # Replace NaN values with -1 that is out of normal scale.
-            self.df[mcs_class].replace(np.nan, -1, inplace=True)
 
     def __is_base_device(self):
         """
@@ -304,11 +309,14 @@ class FieldTestLogPlotter:
                                                 axis=1)
 
         # Calculate GPS time delta for speed estimations
-        self.df['GPS time delta'] = pd.to_datetime(self.df['GPS time'])
+        self.df['GPS time delta'] = pd.to_datetime(self.df['GPS time'], "coerce")
         self.df['GPS time delta'] = pd.to_timedelta(self.df['GPS time delta'] -
                                                     self.df['GPS time delta'][0])
         self.df['GPS time delta'] = self.df['GPS time delta'].dt.total_seconds()
 
+        self.df.dropna(subset=['GPS time delta'], inplace=True)
+        # Reindex DF after any possible line drops
+        self.df.reset_index(drop=True, inplace=True)
         # Calculate total distance (i.e. back and forth route) traveled.
         distance_traveled = []
         speed = []
@@ -442,6 +450,8 @@ class FieldTestLogPlotter:
 
         # Determine 2nd y-axis scale
         voltage_max = self.df[[BATT_VOLTAGE, NRF_VOLTAGE, MPCIE_VOLTAGE, DCIN_VOLTAGE]].max().max()
+        if np.isnan(voltage_max):
+            voltage_max = VOLTAGE_MAX
         voltage_max += 0.25  # 0.25 V margin on top
         interval = 0.5  # 0.5 V interval
 
@@ -451,7 +461,8 @@ class FieldTestLogPlotter:
         if self.df[DCIN_VOLTAGE].notnull().values.any():
             self.df.plot(ax=ax_voltage, x='Timestamp', y=DCIN_VOLTAGE, color=COLOR_DCIN_VOLTAGE)
         self.df.plot(ax=ax_voltage, x='Timestamp', y=MPCIE_VOLTAGE, color=COLOR_3V3_VOLTAGE,
-                     grid=True, ylabel=LABEL_VOLTAGE, yticks=(np.arange(0, voltage_max, interval)))
+                     grid=True, ylabel=LABEL_VOLTAGE, yticks=(np.arange(VOLTAGE_MIN,
+                                                                        voltage_max, interval)))
 
         # Label box upper left corner coordinate relative to base plot coordinate
         ax_voltage.legend(bbox_to_anchor=(1.03, 1.0), loc='upper left')
@@ -459,6 +470,10 @@ class FieldTestLogPlotter:
         # Determine 3rd y-axis scale
         curr_min = self.df[[BATT_CURRENT, NRF_CURRENT, MPCIE_CURRENT, DCIN_CURRENT]].min().min()
         curr_max = self.df[[BATT_CURRENT, NRF_CURRENT, MPCIE_CURRENT, DCIN_CURRENT]].max().max()
+        if np.isnan(curr_min):
+            curr_min = CURRENT_MIN
+        if np.isnan(curr_max):
+            curr_max = CURRENT_MAX
         interval = 0.1  # 0.1 A interval
         curr_max += interval  # 0.1 A margin on the top
         curr_min -= interval  # 0.1 A margin on the bottom
@@ -528,6 +543,10 @@ class FieldTestLogPlotter:
         # Determine y-axis scale
         curr_min = self.df[[BATT_CURRENT, NRF_CURRENT, MPCIE_CURRENT, DCIN_CURRENT]].min().min()
         curr_max = self.df[[BATT_CURRENT, NRF_CURRENT, MPCIE_CURRENT, DCIN_CURRENT]].max().max()
+        if np.isnan(curr_min):
+            curr_min = CURRENT_MIN
+        if np.isnan(curr_max):
+            curr_max = CURRENT_MAX
         interval = 0.1  # 0.1 A interval
         curr_max += interval  # 0.1 A margin on the top
         curr_min -= interval  # 0.1 A margin on the bottom
@@ -571,6 +590,8 @@ class FieldTestLogPlotter:
 
         # Determine y-axis scale
         voltage_max = self.df[[BATT_VOLTAGE, NRF_VOLTAGE, MPCIE_VOLTAGE, DCIN_VOLTAGE]].max().max()
+        if np.isnan(voltage_max):
+            voltage_max = VOLTAGE_MAX
         voltage_max += 0.25  # 0.25 V margin on top
         voltage_interval = 0.5  # 0.5 V interval
 
@@ -585,7 +606,7 @@ class FieldTestLogPlotter:
         self.df.plot(ax=ax_voltage, x='Timestamp', y=MPCIE_VOLTAGE, color=COLOR_3V3_VOLTAGE,
                      grid=True, xlabel=LABEL_TIME_SECONDS, ylabel=LABEL_VOLTAGE,
                      xticks=(np.arange(min_time, max_time, interval)),
-                     yticks=(np.arange(0, voltage_max, voltage_interval)),
+                     yticks=(np.arange(VOLTAGE_MIN, voltage_max, voltage_interval)),
                      title=figure_title, figsize=FIGSIZE)
         # Get dataframe row index according to max distance
         rows = self.df.index[self.df['distance [m]'] == max(self.df['distance [m]'])].tolist()
@@ -601,6 +622,10 @@ class FieldTestLogPlotter:
         # Determine y-axis scale
         curr_min = self.df[[BATT_CURRENT, NRF_CURRENT, MPCIE_CURRENT, DCIN_CURRENT]].min().min()
         curr_max = self.df[[BATT_CURRENT, NRF_CURRENT, MPCIE_CURRENT, DCIN_CURRENT]].max().max()
+        if np.isnan(curr_min):
+            curr_min = CURRENT_MIN
+        if np.isnan(curr_max):
+            curr_max = CURRENT_MAX
         interval = 0.1  # 0.1 A interval
         curr_max += interval  # 0.1 A margin on the top
         curr_min -= interval  # 0.1 A margin on the bottom
@@ -734,14 +759,12 @@ class FieldTestLogPlotter:
         plt.setp(ax_signal_strength.get_xticklabels(), rotation=30, ha='right')
 
         # Determine y-axis scale
-        if min(self.df['TX throughput [Bits/s]']) < min(self.df['RX throughput [Bits/s]']):
-            min_bitrate = min(self.df['TX throughput [Bits/s]'])
-        else:
-            min_bitrate = min(self.df['RX throughput [Bits/s]'])
-        if max(self.df['TX throughput [Bits/s]']) > max(self.df['RX throughput [Bits/s]']):
-            max_bitrate = max(self.df['TX throughput [Bits/s]'])
-        else:
-            max_bitrate = max(self.df['RX throughput [Bits/s]'])
+        min_bitrate = self.df[['TX throughput [Bits/s]', 'RX throughput [Bits/s]']].min().min()
+        max_bitrate = self.df[['TX throughput [Bits/s]', 'RX throughput [Bits/s]']].min().min()
+        if np.isnan(min_bitrate):
+            min_bitrate = BITRATE_MIN
+        if np.isnan(max_bitrate):
+            max_bitrate = BITRATE_MAX
         y_interval = (max_bitrate - min_bitrate) / 10
         max_bitrate += y_interval
 
@@ -849,8 +872,16 @@ class FieldTestLogPlotter:
         # Rotate x-axis tick labels to make them fit better in the picture
         plt.setp(ax_rssi.get_xticklabels(), rotation=30, ha='right')
 
+        # Determine y-axis scale
+        min_mcs = self.df[tx_mcs].min()
+        if np.isnan(min_mcs):
+            min_mcs = MCS_MIN
+        max_mcs = self.df[tx_mcs].max()
+        if np.isnan(max_mcs):
+            max_mcs = MCS_MAX
+
         self.df.plot(kind='scatter', ax=ax_mcs, grid=True, x='distance [m]', y=tx_mcs,
-                     yticks=(np.arange(min(self.df[tx_mcs]), max(self.df[tx_mcs]) + 1, 1)),
+                     yticks=(np.arange(min_mcs, max_mcs + 1, 1)),
                      label='TX MCS class', color=COLOR_TX_MCS, ylabel=LABEL_MCS)
         ax_mcs.legend(bbox_to_anchor=(1.03, 1.0), loc='upper left')
         # Save the figure
@@ -918,8 +949,16 @@ class FieldTestLogPlotter:
         # Rotate x-axis tick labels to make them fit better in the picture
         plt.setp(ax_rssi.get_xticklabels(), rotation=30, ha='right')
 
+        # Determine y-axis scale
+        min_mcs = self.df[tx_mcs].min()
+        max_mcs = self.df[tx_mcs].max()
+        if np.isnan(min_mcs):
+            min_mcs = MCS_MIN
+        if np.isnan(max_mcs):
+            max_mcs = MCS_MAX
+
         self.df.plot(kind='scatter', ax=ax_mcs, grid=True, x='distance traveled [m]', y=tx_mcs,
-                     yticks=(np.arange(min(self.df[tx_mcs]), max(self.df[tx_mcs]) + 1, 1)),
+                     yticks=(np.arange(min_mcs, max_mcs + 1, 1)),
                      label='TX MCS class', color=COLOR_TX_MCS)
         # Label location
         ax_mcs.legend(bbox_to_anchor=(1.03, 1.0), loc='upper left')
@@ -970,15 +1009,19 @@ class FieldTestLogPlotter:
         y_interval = (max_rssi - min_rssi) / 10
 
         if y_interval == 0:
-            return  # Exit if invalid data
+            y_interval = 1
         elif y_interval > 1:
             y_interval = int(y_interval)
 
         subtitle = '_rssi_levels_per_time_' + _mac
         figure_title = self.filename.replace(self.__homedir, '') + subtitle
-        self.df.plot(ax=ax_rssi, x=x_axis, y=rssi_ant0_dbm)
-        self.df.plot(ax=ax_rssi, x=x_axis, y=rssi_ant1_dbm)
-        self.df.plot(ax=ax_rssi, x=x_axis, y=rssi_ant2_dbm)
+        # Include only those antennas to plot that has some real RSSI levels
+        if self.df[rssi_ant0_dbm].max() > OUT_OF_SCALE_RSSI:
+            self.df.plot(ax=ax_rssi, x=x_axis, y=rssi_ant0_dbm)
+        if self.df[rssi_ant1_dbm].max() > OUT_OF_SCALE_RSSI:
+            self.df.plot(ax=ax_rssi, x=x_axis, y=rssi_ant1_dbm)
+        if self.df[rssi_ant2_dbm].max() > OUT_OF_SCALE_RSSI:
+            self.df.plot(ax=ax_rssi, x=x_axis, y=rssi_ant2_dbm)
         self.df.plot(ax=ax_rssi, title=figure_title,
                      grid=True, x=x_axis, y=rssi_dbm,
                      xticks=(np.arange(min_time, max_time, x_interval)),
@@ -990,8 +1033,16 @@ class FieldTestLogPlotter:
         # Rotate x-axis tick labels to make them fit better in the picture
         plt.setp(ax_rssi.get_xticklabels(), rotation=30, ha='right')
 
+        # Determine y-axis scale
+        min_mcs = self.df[rx_mcs].min()
+        max_mcs = self.df[rx_mcs].max()
+        if np.isnan(min_mcs):
+            min_mcs = MCS_MIN
+        if np.isnan(max_mcs):
+            max_mcs = MCS_MAX
+
         self.df.plot(kind='scatter', ax=ax_mcs, grid=True, x='Timestamp', y=rx_mcs,
-                     yticks=(np.arange(min(self.df[rx_mcs]), max(self.df[rx_mcs] + 1), 1)),
+                     yticks=(np.arange(min_mcs, max_mcs + 1, 1)),
                      label='RX MCS class', color=COLOR_RX_MCS)
         # Label location
         ax_mcs.legend(bbox_to_anchor=(1.03, 1.0), loc='upper left')
@@ -1026,16 +1077,13 @@ class FieldTestLogPlotter:
             x_interval = int(x_interval)
 
         # Determine y-axis scale
-        if min(self.df['TX throughput [Bits/s]']) < min(self.df['RX throughput [Bits/s]']):
-            min_bitrate = int(min(self.df['TX throughput [Bits/s]']))
-        else:
-            min_bitrate = int(min(self.df['RX throughput [Bits/s]']))
-        if max(self.df['TX throughput [Bits/s]']) > max(self.df['RX throughput [Bits/s]']):
-            max_bitrate = int(max(self.df['TX throughput [Bits/s]']))
-        else:
-            max_bitrate = int(max(self.df['RX throughput [Bits/s]']))
+        min_bitrate = self.df[['TX throughput [Bits/s]', 'RX throughput [Bits/s]']].min().min()
+        max_bitrate = self.df[['TX throughput [Bits/s]', 'RX throughput [Bits/s]']].max().max()
+        if np.isnan(min_bitrate):
+            min_bitrate = BITRATE_MIN
+        if np.isnan(max_bitrate):
+            max_bitrate = BITRATE_MAX
         y_interval = (max_bitrate - min_bitrate) / 10
-
         if y_interval == 0:
             y_interval = 1
         elif y_interval > 1:
@@ -1079,19 +1127,17 @@ class FieldTestLogPlotter:
         # Rotate x-axis tick labels to make them fit better in the picture
         plt.setp(ax_throughput.get_xticklabels(), rotation=30, ha='right')
         # Determine 2nd y-axis scale
-        if min(self.df[tx_mcs]) < min(self.df[rx_mcs]):
-            min_mcs = int(min(self.df[tx_mcs]))
-        else:
-            min_mcs = int(min(self.df[rx_mcs]))
-        if max(self.df[tx_mcs]) > max(self.df[rx_mcs]):
-            max_mcs = int(max(self.df[tx_mcs]))
-        else:
-            max_mcs = int(max(self.df[rx_mcs]))
+        min_mcs = self.df[[tx_mcs, rx_mcs]].min().min()
+        max_mcs = self.df[[tx_mcs, rx_mcs]].max().max()
+        if np.isnan(min_mcs):
+            min_mcs = MCS_MIN
+        if np.isnan(max_mcs):
+            max_mcs = MCS_MAX
         y_interval = (max_mcs - min_mcs) / 10
         max_mcs += y_interval
 
         if y_interval == 0:
-            return
+            y_interval = 1
         elif y_interval > 1:
             y_interval = int(y_interval)
 
@@ -1134,6 +1180,10 @@ class FieldTestLogPlotter:
         # Determine y-axis scale
         min_bitrate = min(self.df['RX throughput [Bits/s]'])
         max_bitrate = max(self.df['RX throughput [Bits/s]'])
+        if np.isnan(min_bitrate):
+            min_bitrate = BITRATE_MIN
+        if np.isnan(max_bitrate):
+            max_bitrate = BITRATE_MAX
         y_interval = (max_bitrate - min_bitrate) / 10
 
         if y_interval == 0:
@@ -1166,9 +1216,15 @@ class FieldTestLogPlotter:
         # Rotate x-axis tick labels to make them fit better in the picture
         plt.setp(ax_throughput.get_xticklabels(), rotation=30, ha='right')
 
-        logger.debug('min rx mcs: %s, max rx mcs: %s', min(self.df[rx_mcs]), max(self.df[rx_mcs]))
+        # Determine y-axis scale
+        min_mcs = self.df[rx_mcs].min()
+        max_mcs = self.df[rx_mcs].max()
+        if np.isnan(min_mcs):
+            min_mcs = MCS_MIN
+        if np.isnan(max_mcs):
+            max_mcs = MCS_MAX
         self.df.plot(kind='scatter', ax=ax_mcs, grid=True, x='Timestamp', y=rx_mcs,
-                     yticks=(np.arange(min(self.df[rx_mcs]), max(self.df[rx_mcs]) + 1, 1)),
+                     yticks=(np.arange(min_mcs, max_mcs + 1, 1)),
                      label='RX MCS class', color=COLOR_RX_MCS, ylabel=LABEL_MCS)
         # Legend location
         ax_mcs.legend(bbox_to_anchor=(1.03, 1.0), loc='upper left')
@@ -1242,14 +1298,14 @@ def show_usage():
                         are generated. Possible values: 0, 1, false, true. Default value: true.
                     -u: define units for throughput values (b, Kb, Mb)
                     --log <level> where <level> can be INFO or DEBUG
-                    --xaxis <val> defines x-axis for plots. Possible values: time, distance, 
+                    --xaxis <val> defines x-axis for plots. Possible values: time, distance,
                       total_distance. Default value: time.
                     --xstart <val> defines starting point of plot slice.
                     --xstop <val> defines end point of plot slice.
                       For example: --xaxis time --xstart 420 --xstop 840 will produce a figure that
-                      contains rssi, noise, throughput and mcs values starting from timestamp value 
+                      contains rssi, noise, throughput and mcs values starting from timestamp value
                       420s to 840s.
-                    --ismoving <val> defines whether or not logged device should be treated as 
+                    --ismoving <val> defines whether or not logged device should be treated as
                       stationary or moving device. Should be set to zero or false in case tested
                       device has been stationary in actual use case but logging has been on so long
                       time that it cannot be determined from gps coordinates. Default value: true.

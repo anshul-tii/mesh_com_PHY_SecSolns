@@ -10,15 +10,14 @@ LABEL_SNR = 'SNR [dB]'
 LABEL_MCS = 'MCS class'
 
 OUT_OF_SCALE_RSSI = -115
-# Plot y-axis ranges
-"""
-TEMP_RANGE = (0, 100)
-VOLTAGE_RANGE = (3, 4.3)  # 3 - 4.3
-CURRENT_RANGE = (0, 2.5)  # 0 - 1.5
-SIGNAL_STRENGTH_RANGE = (-100, 0)
-MCS_RANGE = (0, 30)  # Modulation Coding Scheme?
-SNR_RANGE = (0, 100)
-"""
+VOLTAGE_MIN = 0
+VOLTAGE_MAX = 4.3
+CURRENT_MIN = 0
+CURRENT_MAX = 2.5
+MCS_MIN = 0
+MCS_MAX = 30
+BITRATE_MIN = 0
+BITRATE_MAX = 10
 
 # 'Final' dataframe column names
 TIMESTAMP = 'Timestamp'
